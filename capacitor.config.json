@@ -1,0 +1,9 @@
+{
+  "appId": "jp.dotabata.futsal",
+  "appName": "ドタバタフットサル",
+  "webDir": "www",
+  "backgroundColor": "#1E1A24",
+  "android": { "allowMixedContent": false, "captureInput": true },
+  "ios": { "contentInset": "never", "scrollEnabled": false },
+  "plugins": { "StatusBar": { "overlaysWebView": true } }
+}

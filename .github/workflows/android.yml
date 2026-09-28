@@ -1,0 +1,49 @@
+name: Androidテスト版をビルド (APK)
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'www/**', 'android/**', 'scripts/**', 'package*.json', 'capacitor.config.json', '.github/workflows/android.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: android
+  cancel-in-progress: true
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: npm ci
+      - run: npm run build
+      - run: npx cap sync android
+      - name: Build debug APK (shared test key)
+        working-directory: android
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+        run: ./gradlew assembleDebug --no-daemon
+      - run: cp android/app/build/outputs/apk/debug/app-debug.apk dotabata-test.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dotabata-test-apk
+          path: dotabata-test.apk
+      - name: Publish to the "test" release (fixed download link)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTE="テスト版 #${{ github.run_number }}（$(date -u +%Y-%m-%d) / ${GITHUB_SHA::7}）。Androidでダウンロード→インストール。"
+          if gh release view test >/dev/null 2>&1; then
+            gh release upload test dotabata-test.apk --clobber
+            gh release edit test --notes "$NOTE"
+          else
+            gh release create test dotabata-test.apk --prerelease --title "テスト版（Android APK）" --notes "$NOTE"
+          fi
