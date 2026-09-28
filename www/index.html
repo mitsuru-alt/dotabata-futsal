@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <meta name="theme-color" content="#1E1A24">
 <meta name="dotabata-web" content="https://mitsuru-alt.github.io/dotabata-futsal/">
-<meta name="dotabata-version" content="0.1.0">
+<meta name="dotabata-version" content="0.2.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -223,6 +223,15 @@ tbody tr+tr td{border-top:1px solid rgba(255,255,255,.08)}
 .rules b{color:var(--ink)}
 #scrOnline .wrap{width:min(100%,900px);display:flex;flex-direction:column;gap:10px}
 .onStart{display:flex;flex-direction:column;gap:12px}
+.rooms{display:flex;flex-direction:column;gap:6px}
+.roomsHead{display:flex;align-items:baseline;gap:10px}
+.roomList{display:flex;flex-direction:column;gap:6px;max-height:34vh;overflow:auto}
+.room{display:grid;grid-template-columns:1fr auto auto;align-items:center;gap:10px;background:var(--panel2);border:2px solid rgba(255,255,255,.18);border-radius:12px;padding:6px 8px 6px 12px;font-weight:900;font-size:13px;text-align:left;color:inherit;cursor:pointer}
+.room:disabled{opacity:.5;cursor:default}
+.room .rn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.room .rm{font-size:11px;color:var(--muted)}
+.room .go{background:var(--sun);color:var(--out);border-radius:9px;padding:4px 12px;font-size:12px}
+.room:disabled .go{background:rgba(255,255,255,.2);color:inherit}
 .lbl{font-weight:900;font-size:12px;color:var(--muted)}
 #codeIn{width:6.5em;font-family:var(--df);font-size:22px;letter-spacing:.15em;text-transform:uppercase;text-align:center;color:var(--out);background:#fff;border:3px solid var(--out);border-radius:12px;padding:4px 6px}
 .note{margin:0;font-size:12px;font-weight:800;color:var(--muted);line-height:1.6}
@@ -377,7 +386,8 @@ tbody tr+tr td{border-top:1px solid rgba(255,255,255,.08)}
     <div class="wrap">
       <div class="row" style="justify-content:space-between"><h2>みんなで遊ぶ</h2><span id="netKind" class="netKind"></span></div>
       <div id="onStart" class="card onStart">
-        <div class="row"><button class="btnx" id="onCreate">部屋をつくる</button></div>
+        <div class="row"><button class="btnx" id="onCreate">部屋をつくる</button><button class="btnx sub" id="onQuick">おまかせ参加</button></div>
+        <div class="rooms" id="roomBox" hidden><div class="roomsHead"><span class="lbl">公開中の部屋</span><span class="note" id="roomState"></span></div><div class="roomList" id="roomList"></div></div>
         <div class="row"><label for="codeIn" class="lbl">部屋コードで参加</label><input id="codeIn" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD"><button class="btnx sub" id="onJoin">参加する</button></div>
         <p class="note" id="onNote"></p>
         <div class="row"><button class="btnx ghost" id="onBack">もどる</button></div>
@@ -2401,7 +2411,7 @@ async function peerTransport(code,host){
     const hostId='dotabata-'+code.toLowerCase();
     const peer=new window.Peer(host?hostId:undefined,peerOpts());
     let onS=()=>{},onL=()=>{}, done=false; const conns=new Map();
-    const T={kind:'P2P（WebRTC）',myId:null,publish:()=>{},onState:f=>onS=f,onLeave:f=>onL=f,close(){ try{peer.destroy();}catch(_){} }};
+    const T={kind:'P2P（WebRTC）',p2p:true,myId:null,publish:()=>{},onState:f=>onS=f,onLeave:f=>onL=f,close(){ try{peer.destroy();}catch(_){} }};
     const fail=e=>{ if(!done){ done=true; try{peer.destroy();}catch(_){} rej(e); } else netFail('接続が切れました'); };
     peer.on('error',e=>{ if(done&&e&&(e.type==='network'||e.type==='server-error'||e.type==='socket-error'||e.type==='socket-closed')) return; if(done&&e&&e.type==='peer-unavailable') return; fail(e); });
     // losing the signalling socket doesn't drop open data channels; just try to get back on it
@@ -2441,8 +2451,111 @@ function errText(e){
   return 'つながりませんでした（'+m.slice(0,40)+'）';
 }
 
+// ---- public room list (no server of our own) ----
+/* A public room also registers a small "beacon" peer under a well-known id (dotabata-pubV-1..N).
+   Anyone on the online screen dials all N ids at once: empty ids fail fast, live beacons answer
+   with the room's code and status and hang up. Joining then goes through the normal code path. */
+const PUB_N=12, BEACON={peer:null,token:null}, SCAN={timer:0,cur:null,cbs:[],rooms:[],at:0,first:true};
+const pubId=n=>'dotabata-pub'+NETV+'-'+n;
+function canBrowse(){ return location.hash!=='#localnet'&&!(window.claude&&typeof window.claude.use==='function'); }
+function roomInfo(){
+  const L=NET.lobby, n=L?SLOT_KEYS.filter(k=>L.slots[k]).length:1;
+  return {k:'room',v:NETV,code:NET.code,name:String(G.char.name||'ホスト').slice(0,6),n,max:L&&L.mode==='vs'?10:5,mode:L?L.mode:'coop',ph:NET.phase};
+}
+function beaconStop(){ BEACON.token=null; if(BEACON.peer){ try{ BEACON.peer.destroy(); }catch(_){} BEACON.peer=null; } }
+async function beaconStart(){
+  beaconStop();
+  if(!(NET.t&&NET.t.p2p&&NET.role==='host'&&NET.pub)) return;
+  const tok={}; BEACON.token=tok;
+  try{ await loadPeer(); }catch(_){ return; }
+  for(let n=1;n<=PUB_N;n++){
+    if(BEACON.token!==tok) return;
+    const p=await new Promise(res=>{
+      let s=false; const q=new window.Peer(pubId(n),peerOpts());
+      const end=v=>{ if(s) return; s=true; if(!v){ try{q.destroy();}catch(_){} } res(v); };
+      q.on('open',()=>end(q)); q.on('error',()=>end(null)); setTimeout(()=>end(null),6000);
+    });
+    if(!p) continue;
+    if(BEACON.token!==tok){ try{p.destroy();}catch(_){} return; }
+    BEACON.peer=p;
+    p.on('connection',c=>{ c.on('open',()=>{ try{ c.send(roomInfo()); }catch(_){} setTimeout(()=>{ try{c.close();}catch(_){} },1500); }); });
+    p.on('disconnected',()=>setTimeout(()=>{ try{ if(BEACON.peer===p&&!p.destroyed&&p.disconnected) p.reconnect(); }catch(_){} },2000));
+    p.on('error',()=>{});
+    return;
+  }
+}
+function scanStop(){ clearTimeout(SCAN.timer); SCAN.timer=0; }
+function scanKick(){ scanStop(); if(!canBrowse()){ $('roomBox').hidden=true; $('onQuick').hidden=true; return; } $('roomBox').hidden=false; $('onQuick').hidden=false; scanLoop(); }
+async function scanLoop(){
+  scanStop();
+  if(NET.t||$('scrOnline').hidden) return;
+  await scanRooms();
+  if(!NET.t&&!$('scrOnline').hidden) SCAN.timer=setTimeout(scanLoop,1500);
+}
+// Missing ids only report back after the signalling server's ~5s expiry, so rooms are shown
+// the moment their beacon answers and the scan just ends by timeout.
+function scanRooms(onRoom){
+  if(SCAN.cur){ if(onRoom) SCAN.cbs.push(onRoom); return SCAN.cur; }
+  SCAN.cbs=onRoom?[onRoom]:[];
+  SCAN.cur=(async()=>{
+    if(SCAN.first) renderRooms(true);
+    try{ await loadPeer(); }catch(_){ renderRooms(false,'通信の準備に失敗しました'); return SCAN.rooms; }
+    const found=new Map();
+    await new Promise(done=>{
+      let fin=false; const left=new Set(); const p=new window.Peer(undefined,peerOpts());
+      const end=()=>{ if(fin) return; fin=true; clearTimeout(to); setTimeout(()=>{ try{p.destroy();}catch(_){} },300); done(); };
+      const drop=id=>{ left.delete(id); if(p.open&&!left.size) end(); };
+      const to=setTimeout(end,6500);
+      p.on('error',e=>{ const m=String(e&&e.message||'').match(/dotabata-pub\d+-\d+/); if(e&&e.type==='peer-unavailable'&&m) drop(m[0]); else if(!p.open) end(); });
+      p.on('open',()=>{
+        for(let n=1;n<=PUB_N;n++){ const id=pubId(n); left.add(id);
+          const c=p.connect(id,{reliable:true,serialization:'json'});
+          c.on('data',d=>{
+            try{c.close();}catch(_){} drop(id);
+            if(!(d&&d.k==='room'&&d.v===NETV&&/^[A-Z0-9]{4}$/.test(d.code))) return;
+            const r={code:d.code,name:String(d.name||'').replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028-\u202e\u2066-\u2069]/g,'').slice(0,6)||'だれか',n:clamp(d.n|0,0,10),max:d.max===10?10:5,mode:d.mode==='vs'?'vs':'coop',ph:d.ph==='match'?'match':'lobby'};
+            found.set(r.code,r);
+            const shown=new Map(SCAN.rooms.map(x=>[x.code,x])); shown.set(r.code,r); SCAN.rooms=sortRooms([...shown.values()]); renderRooms(true);
+            for(const f of SCAN.cbs) try{ f(r); }catch(_){}
+          });
+          c.on('error',()=>drop(id));
+        }
+      });
+    });
+    SCAN.rooms=sortRooms([...found.values()]); SCAN.at=performance.now(); SCAN.first=false;
+    renderRooms(false); return SCAN.rooms;
+  })().finally(()=>{ SCAN.cur=null; SCAN.cbs=[]; });
+  return SCAN.cur;
+}
+const sortRooms=a=>a.sort((x,y)=>(x.ph==='lobby'?0:1)-(y.ph==='lobby'?0:1)||y.n-x.n);
+const joinable=r=>r&&r.ph==='lobby'&&r.n<r.max;
+function renderRooms(searching,err){
+  const box=$('roomList'); if(!box) return;
+  $('roomState').textContent=err||(SCAN.rooms.length?'タップで参加':searching?'さがしています…':'いまは空いてる部屋がありません');
+  box.innerHTML='';
+  for(const r of SCAN.rooms){
+    const full=r.n>=r.max, busy=r.ph!=='lobby';
+    const b=document.createElement('button'); b.type='button'; b.className='room'; b.disabled=full||busy;
+    const a=document.createElement('span'); a.className='rn'; a.textContent=r.name+'の部屋';
+    const m=document.createElement('span'); m.className='rm'; m.textContent=(r.mode==='vs'?'対戦':'協力')+' ・ '+r.n+'/'+r.max+'人';
+    const g=document.createElement('span'); g.className='go'; g.textContent=busy?'試合中':full?'満員':'参加';
+    b.append(a,m,g); b.addEventListener('click',()=>{ ac(); sfx.ui(); joinRoom(r.code); });
+    box.appendChild(b);
+  }
+}
+$('onQuick').addEventListener('click',()=>{
+  ac(); sfx.ui(); if(NET.t||NET.joining) return;
+  const known=SCAN.rooms.find(joinable); if(known){ joinRoom(known.code); return; }
+  setNote('空いてる部屋をさがしています…');
+  let done=false;
+  scanRooms(r=>{ if(!done&&joinable(r)){ done=true; joinRoom(r.code); } }).then(rs=>{
+    if(done||NET.t||NET.joining) return; const r=rs.find(joinable);
+    if(r){ done=true; joinRoom(r.code); } else setNote('空いてる部屋がありませんでした。「部屋をつくる」で待ってみてね');
+  });
+});
+
 // ---- screens ----
-function openOnline(){ show('scrOnline'); renderOnline();
+function openOnline(){ show('scrOnline'); renderOnline(); scanKick();
   if(!NET.t&&G.inviteCode){ $('codeIn').value=G.inviteCode; setNote('招待コード '+G.inviteCode+' を入れました。「参加する」を押してね'); }
 }
 function inviteUrl(){
@@ -2477,15 +2590,18 @@ $('onCreate').addEventListener('click',async()=>{
       NET.lobby={mode:'coop',stage:G.stageIdx,dur:G.dur,ball:G.ballIdx,opp:G.oppIdx,slots:Object.fromEntries(SLOT_KEYS.map(k=>[k,null]))};
       NET.lobby.slots['A'+ROLES.indexOf(TYPES[G.char.type].role)]='H';
       T.onState(hostOnState); T.onLeave(hostOnLeave);
+      NET.pub=store.get('dotabata.pub',true)!==false; scanStop(); beaconStart();
       setNote(''); renderOnline(); return;
     }catch(e){ if(String(e&&e.type).includes('unavailable-id')) continue; setNote(errText(e)); return; }
   }
   setNote('部屋をつくれませんでした。もう一度試してね。');
 });
-$('onJoin').addEventListener('click',async()=>{
-  ac(); sfx.ui();
-  const code=$('codeIn').value.trim().toUpperCase();
+$('onJoin').addEventListener('click',()=>{ ac(); sfx.ui(); joinRoom($('codeIn').value); });
+async function joinRoom(raw){
+  if(NET.t||NET.joining) return;
+  const code=String(raw||'').trim().toUpperCase();
   if(code.length!==4){ setNote('4文字のコードを入れてね'); return; }
+  NET.joining=true; scanStop();
   setNote('接続しています…');
   try{
     const T=await makeTransport(code,false);
@@ -2493,21 +2609,24 @@ $('onJoin').addEventListener('click',async()=>{
     T.onState(clientOnState); T.onLeave(id=>{ if(id===NET.hostId) netFail('ホストが退出しました'); });
     G.inviteCode=null; $('inviteBar').hidden=true;
     setNote('ホストを探しています…'); renderOnline();
-  }catch(e){ setNote(errText(e)); }
-});
+  }catch(e){ setNote(errText(e)); scanKick(); }
+  finally{ NET.joining=false; }
+}
 $('onLeave').addEventListener('click',()=>onlineLeave());
 $('onGo').addEventListener('click',()=>{ if(NET.role==='host') hostStart(); });
 function onlineLeave(){
+  beaconStop(); scanStop();
   if(NET.t){ try{ NET.t.close(); }catch(_){} }
   Object.assign(NET,{t:null,role:null,phase:'idle',peers:new Map(),hostId:null,lobby:null,cfg:null});
   bgmStop(); G.mode='demo'; toTitle();
 }
 function netFail(msg){
   if(!NET.t) return;
+  beaconStop();
   try{ NET.t.close(); }catch(_){}
   Object.assign(NET,{t:null,role:null,phase:'idle',peers:new Map(),hostId:null,lobby:null,cfg:null});
   bgmStop(); G.mode='online'; if(S&&S.net){ startDemo(true); }
-  show('scrOnline'); renderOnline(); setNote(msg);
+  show('scrOnline'); renderOnline(); setNote(msg); scanKick();
 }
 function backToLobby(){
   if(NET.role==='host'){ NET.phase='lobby'; NET.cfg=null; NET.dirty=true; }
@@ -2549,6 +2668,7 @@ function renderLobby(){
   const row=(label,items,cur,onPick)=>{ const r=document.createElement('div'); r.className='row'; const sp=document.createElement('span'); sp.textContent=label; r.appendChild(sp); const cs=document.createElement('div'); cs.className='chips';
     items.forEach((n,i)=>{ const b=document.createElement('button'); b.type='button'; b.className='chip'; b.textContent=n; b.setAttribute('aria-pressed',String(cur===i)); b.disabled=!isHost; b.addEventListener('click',()=>{ onPick(i); NET.dirty=true; sfx.ui(); renderLobby(); }); cs.appendChild(b); });
     r.appendChild(cs); ho.appendChild(r); };
+  if(isHost&&NET.t&&NET.t.p2p) row('公開',['みんなのリストに出す','招待した人だけ'],NET.pub?0:1,i=>{ NET.pub=i===0; store.set('dotabata.pub',NET.pub); if(NET.pub) beaconStart(); else beaconStop(); });
   if(coop) row('CPU',OPPS.map(o=>o.short+'★'.repeat(o.stars)),L.opp,i=>L.opp=i);
   row('ステージ',STAGES.map(x=>x.name),L.stage,i=>L.stage=i);
   row('時間',DURS.map(x=>x[1]),DURS.findIndex(x=>x[0]===L.dur),i=>L.dur=DURS[i][0]);
